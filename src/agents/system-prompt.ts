@@ -712,6 +712,7 @@ export function buildAgentSystemPrompt(params: {
     activeProcessSessions?: ActiveProcessSessionReference[];
   };
   messageToolHints?: string[];
+  toolSchemaDirectoryPrompt?: string;
   sandboxInfo?: EmbeddedSandboxInfo;
   /** Whether read/write/edit/apply_patch are restricted to the workspace root. */
   fsWorkspaceOnly?: boolean;
@@ -840,6 +841,7 @@ export function buildAgentSystemPrompt(params: {
     const name = resolveToolName(tool);
     toolLines.push(summary ? `- ${name}: ${summary}` : `- ${name}`);
   }
+  const toolSchemaDirectoryPrompt = params.toolSchemaDirectoryPrompt?.trim();
   const renderOpenClawToolWorkflowHints = shouldRenderOpenClawToolWorkflowHints({
     surface: promptSurface,
     hasToolList: toolLines.length > 0,
@@ -969,6 +971,7 @@ export function buildAgentSystemPrompt(params: {
     promptMode,
     promptSurface,
     toolLines,
+    toolSchemaDirectoryPrompt,
     renderOpenClawToolWorkflowHints,
     hasGateway,
     readToolName,
@@ -1018,6 +1021,9 @@ export function buildAgentSystemPrompt(params: {
             execToolName,
             processToolName,
           }),
+      ...(toolSchemaDirectoryPrompt
+        ? ["", "### Deferred Tool Schemas", toolSchemaDirectoryPrompt]
+        : []),
       "TOOLS.md is usage guidance, not availability.",
       ...(renderOpenClawToolWorkflowHints
         ? [

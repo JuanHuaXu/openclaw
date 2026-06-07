@@ -28,6 +28,39 @@ debug signal rather than a guess.
 5. Patch the root cause.
 6. Rerun the exact failing probe, then broaden only if the contract requires it.
 
+## Tool Loop / Halt Hunts
+
+Use this when an agent repeats a tool call, says it will act then stops, loses a
+post-tool answer, or loops only when specific plugins are loaded.
+
+1. Treat `looped`, `poisoned session`, and `loop detector fired` as symptoms.
+   Find the upstream transition that made the next model turn believe another
+   tool call was needed.
+2. Capture the full turn boundary: provider-visible prompt/messages/tools,
+   model output, tool request, tool result, replayed context, and final sink
+   output. A stored session row or memory hit is not proof the model saw it.
+3. Classify lifecycle phase before patching: live current-turn tool protocol,
+   historical replay, recalled memory, user-card note, tool result, and channel
+   delivery are separate phases even when their text looks similar.
+4. Build a control matrix:
+   - vanilla OpenClaw + same model + no plugins
+   - one suspect plugin at a time
+   - suspect plugin pairs
+   - current session reset vs old session
+   - tool-assisted recall vs no-tool context-only recall
+5. Compare installed artifacts, not source trees. Record plugin version, install
+   path, expected marker in `dist/`, Gateway restart, and the exact live probe.
+6. For repeated calls, inspect what arrived after the first tool result. If the
+   result lacks a durable "this request is satisfied" signal, or replay demotes
+   it into ordinary text, fix that state boundary instead of only adding loop
+   containment.
+7. For post-tool halts, distinguish provider stop, harness liveness decision,
+   channel delivery failure, and model plan-only output. A retry guard is a
+   catchall; still look for the plugin/context input that made the model stop.
+8. Keep the falsifier next to the hypothesis: name the observation that would
+   prove the root cause is not harness, not plugin A, not plugin B, or not memory
+   replay.
+
 ## Model Transport Logs
 
 Use targeted env flags instead of global debug when the model request shape or
@@ -76,6 +109,25 @@ openclaw logs --follow
 - **Live keys:** use the configured secret workflow for missing provider keys
   before saying live proof is blocked. Env checks are presence-only; never print
   secrets.
+
+## Deploy / Install Proof
+
+For live plugin or runtime installs, prove the installed artifact, not only the
+source checkout:
+
+- Use absolute `src` and `dst` paths; print or inspect both before destructive
+  copy.
+- Create a timestamped backup of the existing installed artifact before
+  overwriting.
+- After copy, inspect the installed path for package/manifest identity and an
+  expected semantic marker: package name, plugin id, version/build stamp, or a
+  newly added symbol/string in `dist/`.
+- Treat build success, copy success, and clean source tests as insufficient; the
+  live process only sees the installed artifact.
+- If the installed identity or marker check fails, do not trust the live
+  instance. Restore or reinstall from the correct source before restarting.
+- Restart managed services only after artifact checks pass, then run the narrow
+  live probe that failed before.
 
 ## Code Pointers
 

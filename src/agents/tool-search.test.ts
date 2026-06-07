@@ -11,9 +11,12 @@ import {
   testing,
   addClientToolsToToolSearchCatalog,
   applyToolSearchCatalog,
+  applyToolSchemaDirectoryCatalog,
+  buildToolSchemaDirectoryPrompt,
   clearToolSearchCatalog,
   createToolSearchCatalogRef,
   createToolSearchTools,
+  estimateToolSchemaDirectoryToolNames,
   projectToolSearchTargetTranscriptMessages,
   TOOL_CALL_RAW_TOOL_NAME,
   TOOL_DESCRIBE_RAW_TOOL_NAME,
@@ -71,12 +74,12 @@ describe("Tool Search", () => {
     const resolved = testing.resolveToolSearchConfig({
       tools: {
         toolSearch: {
-          mode: "tools",
+          mode: "directory",
         },
       },
     } as never);
     expect(resolved.enabled).toBe(true);
-    expect(resolved.mode).toBe("tools");
+    expect(resolved.mode).toBe("directory");
   });
 
   it("falls back to structured controls when code mode is unsupported", () => {
@@ -282,6 +285,103 @@ describe("Tool Search", () => {
       TOOL_CALL_RAW_TOOL_NAME,
     ]);
     expect(compacted.catalogToolCount).toBe(1);
+  });
+
+  it("can expose a compact tool directory while deferring full schemas", async () => {
+    const describeTool = fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe");
+    const callTool = fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call");
+    const target = pluginTool(
+      "fake_message",
+      "Send, reply, react, and manage channel messages with a long schema hidden behind describe.",
+    );
+    target.parameters = {
+      type: "object",
+      required: ["action"],
+      properties: {
+        action: { type: "string", enum: ["send", "react", "upload-file"] },
+        message: { type: "string" },
+      },
+    };
+
+    const compacted = applyToolSchemaDirectoryCatalog({
+      tools: [describeTool, callTool, target],
+      config: { tools: { toolSearch: { enabled: true, mode: "directory" } } } as never,
+      sessionId: "session-schema-directory",
+    });
+
+    expect(compacted.tools.map((tool) => tool.name)).toEqual([
+      TOOL_DESCRIBE_RAW_TOOL_NAME,
+      TOOL_CALL_RAW_TOOL_NAME,
+    ]);
+    expect(JSON.stringify(compacted.tools)).not.toContain("upload-file");
+
+    const directory = buildToolSchemaDirectoryPrompt({
+      sessionId: "session-schema-directory",
+      config: { tools: { toolSearch: { enabled: true, mode: "directory" } } } as never,
+    });
+    expect(directory).toContain("- fake_message");
+    expect(directory).toContain("Call tool_describe");
+    expect(directory).not.toContain("upload-file");
+
+    const runtimeTools = createToolSearchTools({
+      sessionId: "session-schema-directory",
+      config: { tools: { toolSearch: { enabled: true, mode: "directory" } } } as never,
+    });
+    const runtimeDescribeTool = runtimeTools.find(
+      (tool) => tool.name === TOOL_DESCRIBE_RAW_TOOL_NAME,
+    );
+    const runtimeCallTool = runtimeTools.find((tool) => tool.name === TOOL_CALL_RAW_TOOL_NAME);
+    if (!runtimeDescribeTool || !runtimeCallTool) {
+      throw new Error("expected structured Tool Search controls");
+    }
+
+    const described = await runtimeDescribeTool.execute("describe-schema-directory", {
+      id: "fake_message",
+    });
+    expect(JSON.stringify(described)).toContain("upload-file");
+
+    await runtimeCallTool.execute("call-schema-directory", {
+      id: "fake_message",
+      args: { action: "send", message: "hello" },
+    });
+    expect(target.execute).toHaveBeenCalledWith(
+      "tool_search_code:call-schema-directory:fake_message:1",
+      { action: "send", message: "hello" },
+      undefined,
+      undefined,
+      undefined,
+    );
+  });
+
+  it("hydrates likely directory tool schemas while cataloging the rest", () => {
+    const describeTool = fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe");
+    const callTool = fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call");
+    const searchTool = pluginTool("searxng_search", "Search the web for current facts");
+    const messageTool = pluginTool("message", "Send Discord messages and reactions");
+    const cronTool = pluginTool("cron", "Manage reminders and scheduled wakeups");
+    const hydrated = estimateToolSchemaDirectoryToolNames({
+      tools: [searchTool, messageTool, cronTool],
+      query: "look up funny penguin meme and post it here",
+      maxTools: 2,
+      requiredToolNames: ["message"],
+    });
+
+    expect(hydrated).toEqual(["message", "searxng_search"]);
+
+    const compacted = applyToolSchemaDirectoryCatalog({
+      tools: [describeTool, callTool, messageTool, searchTool, cronTool],
+      config: { tools: { toolSearch: { enabled: true, mode: "directory" } } } as never,
+      sessionId: "session-schema-directory-hydrated",
+      hydrateToolNames: hydrated,
+    });
+
+    expect(compacted.catalogToolCount).toBe(3);
+    expect(compacted.tools.map((tool) => tool.name)).toEqual([
+      TOOL_DESCRIBE_RAW_TOOL_NAME,
+      TOOL_CALL_RAW_TOOL_NAME,
+      "message",
+      "searxng_search",
+    ]);
   });
 
   it("drops inactive controls when the selected Tool Search control is unavailable", () => {

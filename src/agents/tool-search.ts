@@ -36,12 +36,17 @@ const TOOL_SEARCH_CONTROL_TOOL_NAMES = new Set([
   TOOL_CALL_RAW_TOOL_NAME,
 ]);
 
+const TOOL_SCHEMA_DIRECTORY_CONTROL_TOOL_NAMES = new Set([
+  TOOL_DESCRIBE_RAW_TOOL_NAME,
+  TOOL_CALL_RAW_TOOL_NAME,
+]);
+
 const DEFAULT_CODE_TIMEOUT_MS = 10_000;
 const DEFAULT_SEARCH_LIMIT = 8;
 const DEFAULT_MAX_SEARCH_LIMIT = 20;
 const MAX_REUSABLE_CATALOG_SNAPSHOTS = 256;
 
-type ToolSearchMode = "code" | "tools";
+type ToolSearchMode = "code" | "tools" | "directory";
 type CatalogSource = "openclaw" | "mcp" | "client";
 type CatalogTool = AnyAgentTool | ToolDefinition;
 type CatalogVisibilityOptions = {
@@ -107,6 +112,15 @@ export type ToolSearchCatalogEntry = {
   description: string;
   parameters?: unknown;
   tool: CatalogTool;
+};
+
+type ToolSearchDirectoryIntent = {
+  tokens: Set<string>;
+  hasUrl: boolean;
+  hasFilePath: boolean;
+  hasMention: boolean;
+  hasSchedule: boolean;
+  hasCurrentFact: boolean;
 };
 
 export type ToolSearchCatalogSession = {
@@ -435,7 +449,7 @@ export function resolveToolSearchConfig(config?: OpenClawConfig): ToolSearchConf
   const raw = readToolSearchConfig(config);
   const rawMode = typeof raw.mode === "string" ? raw.mode : "code";
   const requestedMode: ToolSearchMode =
-    rawMode === "tools" || rawMode === "code" ? rawMode : "code";
+    rawMode === "tools" || rawMode === "directory" || rawMode === "code" ? rawMode : "code";
   const mode: ToolSearchMode =
     requestedMode === "code" && !isToolSearchCodeModeSupported() ? "tools" : requestedMode;
   const configured = Object.keys(raw).some((key) => key !== "enabled");
@@ -872,6 +886,46 @@ export function applyToolSearchCatalog(params: {
   });
 }
 
+/** Keep tool names discoverable while deferring heavyweight JSON schemas behind describe/call. */
+export function applyToolSchemaDirectoryCatalog(params: {
+  tools: AnyAgentTool[];
+  config?: OpenClawConfig;
+  sessionId?: string;
+  sessionKey?: string;
+  agentId?: string;
+  runId?: string;
+  catalogRef?: ToolSearchCatalogRef;
+  toolHookContext?: HookContext;
+  hydrateToolNames?: Iterable<string>;
+}): {
+  tools: AnyAgentTool[];
+  compacted: boolean;
+  catalogToolCount: number;
+  catalogRegistered: boolean;
+  catalogReused: boolean;
+} {
+  const hydrateToolNames = new Set(
+    normalizeStringEntries(Array.from(params.hydrateToolNames ?? [])),
+  );
+  return applyToolCatalogCompaction({
+    ...params,
+    enabled: resolveToolSearchConfig(params.config).enabled,
+    isVisibleControlTool: (tool) => TOOL_SCHEMA_DIRECTORY_CONTROL_TOOL_NAMES.has(tool.name),
+    isVisibleCatalogTool: (tool) => hydrateToolNames.has(tool.name),
+  });
+}
+
+export function buildToolSchemaDirectoryPrompt(
+  ctx: ToolSearchToolContext,
+  options?: CatalogVisibilityOptions,
+): string {
+  const runtime = new ToolSearchRuntime(
+    ctx,
+    resolveToolSearchConfig(ctx.runtimeConfig ?? ctx.config),
+  );
+  return formatToolSearchCatalogDirectory(runtime.all(options));
+}
+
 /** Move client-provided tools into an existing Tool Search catalog. */
 export function addClientToolsToToolSearchCatalog(params: {
   tools: ToolDefinition[];
@@ -991,6 +1045,167 @@ function compactEntry(entry: ToolSearchCatalogEntry) {
     label: entry.label,
     description: entry.description,
   };
+}
+
+function compactDirectoryDescription(description: string): string {
+  const normalized = description.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 180) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 177).trimEnd()}...`;
+}
+
+function formatToolDirectoryEntry(entry: ReturnType<typeof compactEntry>): string {
+  const description = compactDirectoryDescription(entry.description);
+  const owner = entry.sourceName ? ` (${entry.sourceName})` : "";
+  return `- ${entry.name}${owner}: ${description || "No description."}`;
+}
+
+function formatToolSearchCatalogDirectory(entries: Array<ReturnType<typeof compactEntry>>): string {
+  if (entries.length === 0) {
+    return "Available deferred-schema tools: none.";
+  }
+  return [
+    "Available deferred-schema tools:",
+    ...entries
+      .toSorted((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+      .map(formatToolDirectoryEntry),
+    "",
+    "Call tool_describe with a listed tool name to load its full schema before using tool_call.",
+  ].join("\n");
+}
+
+const TOOL_DIRECTORY_HYDRATION_KEYWORDS: Array<{
+  terms: readonly string[];
+  toolHints: readonly string[];
+  weight: number;
+}> = [
+  {
+    terms: ["search", "lookup", "look", "find", "current", "today", "price", "latest", "news"],
+    toolHints: ["search", "searxng", "web"],
+    weight: 8,
+  },
+  {
+    terms: ["url", "link", "page", "fetch", "read", "article", "http", "https"],
+    toolHints: ["fetch", "browser"],
+    weight: 8,
+  },
+  {
+    terms: ["send", "reply", "message", "post", "react", "embed", "discord", "imessage"],
+    toolHints: ["message", "session", "send"],
+    weight: 7,
+  },
+  {
+    terms: ["file", "path", "read", "write", "edit", "patch", "grep", "list"],
+    toolHints: ["read", "write", "edit", "grep", "find", "ls", "patch"],
+    weight: 6,
+  },
+  {
+    terms: ["run", "command", "shell", "terminal", "build", "test", "pnpm", "git"],
+    toolHints: ["exec", "process"],
+    weight: 7,
+  },
+  {
+    terms: ["remember", "recall", "memory", "know", "who", "what", "when"],
+    toolHints: ["memory"],
+    weight: 6,
+  },
+  {
+    terms: ["remind", "schedule", "later", "tomorrow", "daily", "weekly", "cron"],
+    toolHints: ["cron", "automation", "heartbeat"],
+    weight: 8,
+  },
+  {
+    terms: ["image", "picture", "photo", "meme", "gif", "screenshot", "visual"],
+    toolHints: ["image", "vision", "browser"],
+    weight: 6,
+  },
+  {
+    terms: ["audio", "voice", "speak", "tts", "transcribe"],
+    toolHints: ["audio", "voice", "tts"],
+    weight: 6,
+  },
+];
+
+function readToolDirectoryIntent(query: string): ToolSearchDirectoryIntent {
+  const tokens = new Set(tokenize(query));
+  return {
+    tokens,
+    hasUrl: tokens.has("http") || tokens.has("https") || /https?:\/\//iu.test(query),
+    hasFilePath: tokens.has("/") || /(^|\s)(\.{1,2}\/|\/|[a-z]:\\)/iu.test(query),
+    hasMention: /<@!?\d+>/u.test(query) || tokens.has("discord"),
+    hasSchedule: ["remind", "schedule", "later", "tomorrow", "daily", "weekly", "cron"].some(
+      (term) => tokens.has(term),
+    ),
+    hasCurrentFact: ["current", "today", "latest", "price", "weather", "news"].some((term) =>
+      tokens.has(term),
+    ),
+  };
+}
+
+function scoreDirectoryTool(
+  tool: Pick<AnyAgentTool, "name" | "description">,
+  intent: ToolSearchDirectoryIntent,
+) {
+  const toolText = `${tool.name} ${tool.description ?? ""}`.toLowerCase();
+  const toolTokens = new Set(tokenize(toolText));
+  let score = 0;
+  for (const token of intent.tokens) {
+    if (toolTokens.has(token)) {
+      score += 2;
+    }
+  }
+  for (const group of TOOL_DIRECTORY_HYDRATION_KEYWORDS) {
+    if (!group.terms.some((term) => intent.tokens.has(term))) {
+      continue;
+    }
+    if (group.toolHints.some((hint) => toolText.includes(hint))) {
+      score += group.weight;
+    }
+  }
+  if (intent.hasUrl && /fetch|browser|web/iu.test(toolText)) {
+    score += 10;
+  }
+  if (intent.hasFilePath && /read|write|edit|grep|find|ls|file|patch/iu.test(toolText)) {
+    score += 8;
+  }
+  if (intent.hasMention && /message|discord|react|send/iu.test(toolText)) {
+    score += 8;
+  }
+  if (intent.hasSchedule && /cron|schedule|remind|heartbeat|automation/iu.test(toolText)) {
+    score += 8;
+  }
+  if (intent.hasCurrentFact && /search|web|fetch|weather|finance|price/iu.test(toolText)) {
+    score += 8;
+  }
+  return score;
+}
+
+export function estimateToolSchemaDirectoryToolNames(params: {
+  tools: readonly Pick<AnyAgentTool, "name" | "description">[];
+  query?: string;
+  maxTools?: number;
+  requiredToolNames?: Iterable<string>;
+}): string[] {
+  const maxTools = Math.max(0, Math.min(12, params.maxTools ?? 4));
+  const required = normalizeStringEntries(Array.from(params.requiredToolNames ?? []));
+  const requiredSet = new Set(required);
+  const query = params.query?.trim() ?? "";
+  if (!query && required.length >= maxTools) {
+    return required.slice(0, maxTools);
+  }
+  const intent = readToolDirectoryIntent(query);
+  const scored = params.tools
+    .filter((tool) => !TOOL_SEARCH_CONTROL_TOOL_NAMES.has(tool.name))
+    .map((tool) => ({
+      name: tool.name,
+      score: requiredSet.has(tool.name)
+        ? Number.MAX_SAFE_INTEGER
+        : scoreDirectoryTool(tool, intent),
+    }))
+    .filter((entry) => entry.score > 0)
+    .toSorted((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  return uniqueStrings([...required, ...scored.map((entry) => entry.name)]).slice(0, maxTools);
 }
 
 function describeEntry(entry: ToolSearchCatalogEntry) {
@@ -1254,6 +1469,7 @@ export function applyToolCatalogCompaction(params: {
   catalogRef?: ToolSearchCatalogRef;
   toolHookContext?: HookContext;
   isVisibleControlTool: (tool: AnyAgentTool) => boolean;
+  isVisibleCatalogTool?: (tool: AnyAgentTool) => boolean;
   shouldCatalogTool?: (tool: AnyAgentTool) => boolean;
 }): {
   tools: AnyAgentTool[];
@@ -1296,7 +1512,9 @@ export function applyToolCatalogCompaction(params: {
     }
     if (shouldCatalog(tool)) {
       catalog.push(toCatalogEntry(tool, undefined, params.toolHookContext));
-      continue;
+      if (!params.isVisibleCatalogTool?.(tool)) {
+        continue;
+      }
     }
     visible.push(tool);
   }

@@ -209,11 +209,16 @@ import { filterRuntimeCompatibleTools } from "../../tool-schema-projection.js";
 import { logRuntimeToolSchemaQuarantine } from "../../tool-schema-quarantine.js";
 import {
   addClientToolsToToolSearchCatalog,
+  applyToolSchemaDirectoryCatalog,
   applyToolSearchCatalog,
+  buildToolSchemaDirectoryPrompt,
   clearToolSearchCatalog,
   createToolSearchCatalogRef,
+  estimateToolSchemaDirectoryToolNames,
   projectToolSearchTargetTranscriptMessages,
   resolveToolSearchConfig,
+  TOOL_CALL_RAW_TOOL_NAME,
+  TOOL_DESCRIBE_RAW_TOOL_NAME,
   type ToolSearchCatalogRef,
   type ToolSearchCatalogToolExecutor,
   type ToolSearchTargetTranscriptProjection,
@@ -1131,6 +1136,7 @@ export async function runEmbeddedAttempt(
     });
     const toolsEnabled = supportsModelTools(params.model);
     const codeModeConfig = resolveCodeModeConfig(params.config, sessionAgentId);
+    const toolSearchConfig = resolveToolSearchConfig(params.config);
     const codeModeControlsEnabledForRun =
       toolsEnabled &&
       params.disableTools !== true &&
@@ -1143,7 +1149,7 @@ export async function runEmbeddedAttempt(
       !isRawModelRun &&
       params.toolsAllow?.length !== 0 &&
       !codeModeControlsEnabledForRun &&
-      resolveToolSearchConfig(params.config).enabled;
+      toolSearchConfig.enabled;
     const effectiveToolsAllow =
       toolSearchControlsEnabledForRun && toolsAllowWithForcedRuntimeTools
         ? [
@@ -1591,6 +1597,28 @@ export async function runEmbeddedAttempt(
           },
         })
       : [];
+    const directoryRequiredToolNames =
+      params.forceMessageTool === true || params.sourceReplyDeliveryMode === "message_tool_only"
+        ? ["message"]
+        : [];
+    const directoryHydratedToolNames =
+      toolSearchControlsEnabledForRun && toolSearchConfig.mode === "directory"
+        ? (() => {
+            try {
+              return estimateToolSchemaDirectoryToolNames({
+                tools: effectiveTools,
+                query: params.prompt,
+                maxTools: 4,
+                requiredToolNames: directoryRequiredToolNames,
+              });
+            } catch (err) {
+              log.warn(
+                `tool-search: directory schema estimation failed; continuing with deferred schemas only (${String(err)})`,
+              );
+              return directoryRequiredToolNames;
+            }
+          })()
+        : [];
     const toolSearch = codeModeControlsEnabledForRun
       ? applyCodeModeCatalog({
           tools: [...codeModeTools, ...effectiveTools],
@@ -1602,16 +1630,28 @@ export async function runEmbeddedAttempt(
           catalogRef: toolSearchCatalogRef,
           toolHookContext: catalogToolHookContext,
         })
-      : applyToolSearchCatalog({
-          tools: effectiveTools,
-          config: params.config,
-          sessionId: params.sessionId,
-          sessionKey: sandboxSessionKey,
-          agentId: sessionAgentId,
-          runId: params.runId,
-          catalogRef: toolSearchCatalogRef,
-          toolHookContext: catalogToolHookContext,
-        });
+      : toolSearchConfig.mode === "directory"
+        ? applyToolSchemaDirectoryCatalog({
+            tools: effectiveTools,
+            config: params.config,
+            sessionId: params.sessionId,
+            sessionKey: sandboxSessionKey,
+            agentId: sessionAgentId,
+            runId: params.runId,
+            catalogRef: toolSearchCatalogRef,
+            toolHookContext: catalogToolHookContext,
+            hydrateToolNames: directoryHydratedToolNames,
+          })
+        : applyToolSearchCatalog({
+            tools: effectiveTools,
+            config: params.config,
+            sessionId: params.sessionId,
+            sessionKey: sandboxSessionKey,
+            agentId: sessionAgentId,
+            runId: params.runId,
+            catalogRef: toolSearchCatalogRef,
+            toolHookContext: catalogToolHookContext,
+          });
     const projectedToolSearchTools = filterLocalModelLeanTools({
       tools: toolSearch.tools,
       config: params.config,
@@ -1632,7 +1672,9 @@ export async function runEmbeddedAttempt(
       log.info(
         codeModeControlsEnabledForRun
           ? `code-mode: cataloged ${toolSearch.catalogToolCount} tools behind exec/wait`
-          : `tool-search: cataloged ${toolSearch.catalogToolCount} tools behind compact prompt surface`,
+          : toolSearchConfig.mode === "directory"
+            ? `tool-search: cataloged ${toolSearch.catalogToolCount} tools behind compact directory surface`
+            : `tool-search: cataloged ${toolSearch.catalogToolCount} tools behind compact prompt surface`,
       );
     }
     prepStages.mark("bundle-tools");
@@ -1665,7 +1707,9 @@ export async function runEmbeddedAttempt(
       controlsEnabled: toolSearchControlsEnabledForRun || codeModeControlsEnabledForRun,
       controlNames: codeModeControlsEnabledForRun
         ? [CODE_MODE_EXEC_TOOL_NAME, CODE_MODE_WAIT_TOOL_NAME]
-        : undefined,
+        : toolSearchConfig.mode === "directory"
+          ? [TOOL_DESCRIBE_RAW_TOOL_NAME, TOOL_CALL_RAW_TOOL_NAME]
+          : undefined,
       explicitAllowlistSources: explicitToolAllowlistSources,
     });
     const allowedToolNames = toolSearchRunPlan.visibleAllowedToolNames;
@@ -1750,6 +1794,20 @@ export async function runEmbeddedAttempt(
           accountId: params.agentAccountId,
         })
       : undefined;
+    const toolSchemaDirectoryPrompt =
+      toolSearchControlsEnabledForRun &&
+      toolSearchConfig.mode === "directory" &&
+      toolSearch.catalogRegistered
+        ? buildToolSchemaDirectoryPrompt({
+            config: params.config,
+            runtimeConfig: params.config,
+            agentId: sessionAgentId,
+            sessionKey: sandboxSessionKey,
+            sessionId: params.sessionId,
+            runId: params.runId,
+            catalogRef: toolSearchCatalogRef,
+          })
+        : undefined;
 
     const defaultModelRef = resolveDefaultModelForAgent({
       cfg: params.config ?? {},
@@ -1869,6 +1927,7 @@ export async function runEmbeddedAttempt(
         }),
         runtimeInfo,
         messageToolHints,
+        toolSchemaDirectoryPrompt,
         sandboxInfo,
         tools: effectiveTools,
         userTimezone,
