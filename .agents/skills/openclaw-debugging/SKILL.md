@@ -60,6 +60,13 @@ post-tool answer, or loops only when specific plugins are loaded.
 8. Keep the falsifier next to the hypothesis: name the observation that would
    prove the root cause is not harness, not plugin A, not plugin B, or not memory
    replay.
+9. When two plugins only fail together, trace their shared contract: provider
+   input, tool result shape, context-engine replay, and any side memory/user-card
+   injection. Do not blame the plugin that made the visible call until the
+   post-tool provider payload proves it reintroduced the intent.
+10. For loop fixes, prefer a durable execution-state invariant over a loop
+    detector: after a tool fulfills the active request, the next provider turn
+    must see that completion as current-turn state, not only as historical text.
 
 ## Model Transport Logs
 
@@ -89,6 +96,24 @@ Watch logs with:
 ```bash
 openclaw logs --follow
 ```
+
+## Context-Efficient Capture
+
+Use artifact-first capture when raw transport output would flood the chat or
+context window.
+
+- For HTTP traffic, write packet captures to disk first:
+  `tcpdump -i any -s 0 -w /tmp/openclaw-ollama.pcap '<filter>'`.
+- Summarize with stock macOS tools before pasting:
+  `tcpdump -nn -tttt -r /tmp/openclaw-ollama.pcap 'tcp port <port>' | head`
+  and `strings /tmp/openclaw-ollama.pcap | grep -E '<small pattern set>'`.
+- Prefer trajectory/event summaries for run timing, token counts, model calls,
+  and tool calls. Keep full trajectory bundles private unless explicitly
+  sanitized.
+- Do not assume `rg` or `tshark` exist on a live Mac. Provide `grep`, `strings`,
+  `tcpdump -r`, `python`, or `node` fallbacks in exact commands.
+- Paste reports under 100 lines by default; point to artifact paths for the raw
+  evidence.
 
 ## Common Boundaries
 
@@ -128,6 +153,13 @@ source checkout:
   instance. Restore or reinstall from the correct source before restarting.
 - Restart managed services only after artifact checks pass, then run the narrow
   live probe that failed before.
+- If a live-daemon probe uses a synthetic session, first prove the daemon has
+  relevant persisted state for that session. `totalTurns=0`, missing cursors, or
+  `overbudget_not_compacted` can prove the probe is invalid, not that the patch
+  failed.
+- Compare source tests, packed artifact tests, installed `dist/` marker checks,
+  and live behavior separately. A fake RPC test can prove local logic while
+  still missing real daemon output shape.
 
 ## Code Pointers
 

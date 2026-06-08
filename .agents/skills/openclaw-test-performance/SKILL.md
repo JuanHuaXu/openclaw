@@ -29,6 +29,12 @@ test:extensions:batch <plugin[,plugin...]>` or plugin-inspector command
      `/usr/bin/time -l pnpm test <file-or-files> --maxWorkers=1 --reporter=verbose`
    - For import-heavy suspicion add:
      `OPENCLAW_VITEST_IMPORT_DURATIONS=1 OPENCLAW_VITEST_PRINT_IMPORT_BREAKDOWN=1`.
+   - For live agent latency, apply generic measurement hygiene from
+     `performance-audit`, then collect a full-spread OpenClaw table before
+     patching:
+     total wall time, provider HTTP/model time, non-provider overhead, input
+     tokens, visible tool count, pre-first-model gap, tool duration,
+     post-tool-to-next-model gap, and plugin sub-spans.
 3. Separate wall/runner noise from real file cost:
    - Compare Vitest duration, test body timing, import breakdown, wall time, and
      max RSS.
@@ -52,6 +58,10 @@ test:extensions:batch <plugin[,plugin...]>` or plugin-inspector command
    - Keep schedulers/background loops off unless the test proves scheduling.
    - In plugin paths, move static metadata into manifest/lightweight artifacts
      and keep runtime plugin loads behind explicit execution boundaries.
+   - For context-engine latency, separate retrieval, replay assembly,
+     compaction, daemon RPC, and provider input-size cost before changing token
+     caps. A smaller cap may hide the symptom while the wrong hot-path trigger
+     still fires every turn.
 6. Preserve coverage shape:
    - Do not delete a slow integration proof unless the exact production
      composition is extracted into a named helper and tested.
@@ -224,6 +234,30 @@ Reuse an existing Vitest JSON report:
 pnpm test:perf:groups --report <vitest-json> \
   --output .artifacts/test-perf/<name>.json
 ```
+
+## Live Agent Spread Report
+
+Use this shape when debugging slow Discord/iMessage/agent turns:
+
+```markdown
+Simple PONG A/B
+
+| Case                 | Total | Provider HTTP | Non-provider overhead | Input tokens | Tools |
+| -------------------- | ----: | ------------: | --------------------: | -----------: | ----: |
+| Live config + plugin | `0ms` |         `0ms` |                 `0ms` |          `0` |   `0` |
+| No context engine    | `0ms` |         `0ms` |                 `0ms` |          `0` |   `0` |
+| Tools-ish no context | `0ms` |         `0ms` |                 `0ms` |          `0` |   `0` |
+
+Tool Runs
+
+| Run shape | Total | Pre-first-provider | First provider |  Tool | Tool-done -> second provider | Second provider |
+| --------- | ----: | -----------------: | -------------: | ----: | ---------------------------: | --------------: |
+| core tool | `0ms` |              `0ms` |          `0ms` | `0ms` |                        `0ms` |           `0ms` |
+```
+
+Read this table causally: a large provider column is model/input-size cost; a
+large pre-first-provider or post-tool gap is harness/plugin/context overhead; a
+large tool column is the tool/plugin/backend itself.
 
 ## Verification
 

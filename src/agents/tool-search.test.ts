@@ -384,6 +384,108 @@ describe("Tool Search", () => {
     ]);
   });
 
+  it("hydrates web search and fetch together for directory web intents", () => {
+    const webSearchTool = pluginTool("web_search", "Search the web for current facts");
+    const webFetchTool = pluginTool("web_fetch", "Fetch URLs and extract readable content");
+    const memoryTool = pluginTool("memory_search", "Search durable memory");
+    const cronTool = pluginTool("cron", "Manage reminders and scheduled wakeups");
+
+    const hydrated = estimateToolSchemaDirectoryToolNames({
+      tools: [memoryTool, cronTool, webFetchTool, webSearchTool],
+      query: "search today's latest AI news",
+      maxTools: 2,
+    });
+
+    expect(hydrated).toEqual(["web_search", "web_fetch"]);
+  });
+
+  it("keeps grouped web tools inside the directory hydration cap", () => {
+    const webSearchTool = pluginTool("web_search", "Search the web for current facts");
+    const webFetchTool = pluginTool("web_fetch", "Fetch URLs and extract readable content");
+    const messageTool = pluginTool("message", "Send Discord messages and reactions");
+
+    const hydrated = estimateToolSchemaDirectoryToolNames({
+      tools: [messageTool, webFetchTool, webSearchTool],
+      query: "read https://example.com and post it here",
+      maxTools: 3,
+      requiredToolNames: ["message"],
+    });
+
+    expect(hydrated).toEqual(["message", "web_fetch", "web_search"]);
+  });
+
+  it("groups active web-capability tools without hard-coded tool names", () => {
+    const searchTool = pluginTool("brave_lookup", "Search the web for live current facts");
+    const fetchTool = pluginTool("firecrawl_page", "Fetch URL pages and extract article content");
+    const memoryTool = pluginTool("memory_search", "Search durable memory");
+
+    const hydrated = estimateToolSchemaDirectoryToolNames({
+      tools: [memoryTool, fetchTool, searchTool],
+      query: "search current GPU prices and read the best result",
+      maxTools: 2,
+    });
+
+    expect(hydrated).toEqual(["brave_lookup", "firecrawl_page"]);
+  });
+
+  it("groups common web providers without hydrating memory search", () => {
+    const searchTool = pluginTool("google_search", "Search Google for live results");
+    const fetchTool = pluginTool("page_fetch", "Fetch URL pages and extract article content");
+    const memoryTool = pluginTool("memory_search", "Search durable memory");
+
+    const hydrated = estimateToolSchemaDirectoryToolNames({
+      tools: [memoryTool, fetchTool, searchTool],
+      query: "latest market news",
+      maxTools: 2,
+    });
+
+    expect(hydrated).toEqual(["google_search", "page_fetch"]);
+  });
+
+  it("groups active memory-capability tools for recall intents without hard-coded tool names", () => {
+    const recallTool = pluginTool("recall_find", "Search durable memory and prior history");
+    const getTool = pluginTool("knowledge_get", "Get one recalled knowledge item by id");
+    const expandTool = pluginTool("graph_expand", "Expand prior memory graph context");
+    const webTool = pluginTool("web_search", "Search the web for current facts");
+
+    const hydrated = estimateToolSchemaDirectoryToolNames({
+      tools: [webTool, expandTool, getTool, recallTool],
+      query: "what did we decide about tool loop fixes?",
+      maxTools: 3,
+      requiredToolNames: ["recall_find"],
+    });
+
+    expect(hydrated).toEqual(["recall_find", "graph_expand", "knowledge_get"]);
+  });
+
+  it("does not group memory tools for current-fact web queries", () => {
+    const webTool = pluginTool("web_search", "Search the web for current facts");
+    const memorySearchTool = pluginTool("memory_search", "Search durable memory");
+    const memoryGetTool = pluginTool("memory_get", "Get recalled memory by id");
+
+    const hydrated = estimateToolSchemaDirectoryToolNames({
+      tools: [memoryGetTool, memorySearchTool, webTool],
+      query: "what is the gold price today?",
+      maxTools: 3,
+    });
+
+    expect(hydrated).toEqual(["web_search"]);
+  });
+
+  it("does not treat current who-is questions as memory recall", () => {
+    const webTool = pluginTool("web_search", "Search the web for current facts");
+    const memorySearchTool = pluginTool("memory_search", "Search durable memory");
+    const memoryGetTool = pluginTool("memory_get", "Get recalled memory by id");
+
+    const hydrated = estimateToolSchemaDirectoryToolNames({
+      tools: [memoryGetTool, memorySearchTool, webTool],
+      query: "who is the president today?",
+      maxTools: 3,
+    });
+
+    expect(hydrated).toEqual(["web_search"]);
+  });
+
   it("drops inactive controls when the selected Tool Search control is unavailable", () => {
     const searchTool = fakeTool(TOOL_SEARCH_RAW_TOOL_NAME, "search");
     const describeTool = fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe");

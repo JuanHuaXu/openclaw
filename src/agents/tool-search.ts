@@ -121,7 +121,10 @@ type ToolSearchDirectoryIntent = {
   hasMention: boolean;
   hasSchedule: boolean;
   hasCurrentFact: boolean;
+  hasMemoryRecall: boolean;
 };
+
+type ToolDirectoryFamily = "memory" | "web";
 
 export type ToolSearchCatalogSession = {
   entries: ToolSearchCatalogEntry[];
@@ -1082,7 +1085,7 @@ const TOOL_DIRECTORY_HYDRATION_KEYWORDS: Array<{
 }> = [
   {
     terms: ["search", "lookup", "look", "find", "current", "today", "price", "latest", "news"],
-    toolHints: ["search", "searxng", "web"],
+    toolHints: ["searxng", "web"],
     weight: 8,
   },
   {
@@ -1106,7 +1109,20 @@ const TOOL_DIRECTORY_HYDRATION_KEYWORDS: Array<{
     weight: 7,
   },
   {
-    terms: ["remember", "recall", "memory", "know", "who", "what", "when"],
+    terms: [
+      "remember",
+      "recall",
+      "memory",
+      "memories",
+      "known",
+      "history",
+      "previous",
+      "prior",
+      "earlier",
+      "decided",
+      "decision",
+      "discussed",
+    ],
     toolHints: ["memory"],
     weight: 6,
   },
@@ -1129,6 +1145,27 @@ const TOOL_DIRECTORY_HYDRATION_KEYWORDS: Array<{
 
 function readToolDirectoryIntent(query: string): ToolSearchDirectoryIntent {
   const tokens = new Set(tokenize(query));
+  const hasCurrentFact = ["current", "today", "latest", "price", "weather", "news"].some((term) =>
+    tokens.has(term),
+  );
+  const hasExplicitMemoryRecall = [
+    "remember",
+    "recall",
+    "memory",
+    "memories",
+    "known",
+    "history",
+    "previous",
+    "prior",
+    "earlier",
+    "decided",
+    "decision",
+    "discussed",
+  ].some((term) => tokens.has(term));
+  const hasIdentityRecall =
+    /\b(?:do you know|who (?:is|are|was)|what did (?:we|i|you|they)|when did (?:we|i|you|they))\b/iu.test(
+      query,
+    );
   return {
     tokens,
     hasUrl: tokens.has("http") || tokens.has("https") || /https?:\/\//iu.test(query),
@@ -1137,10 +1174,43 @@ function readToolDirectoryIntent(query: string): ToolSearchDirectoryIntent {
     hasSchedule: ["remind", "schedule", "later", "tomorrow", "daily", "weekly", "cron"].some(
       (term) => tokens.has(term),
     ),
-    hasCurrentFact: ["current", "today", "latest", "price", "weather", "news"].some((term) =>
-      tokens.has(term),
-    ),
+    hasCurrentFact,
+    hasMemoryRecall: hasExplicitMemoryRecall || (hasIdentityRecall && !hasCurrentFact),
   };
+}
+
+function classifyDirectoryToolFamilies(
+  tool: Pick<AnyAgentTool, "name" | "description">,
+  intent: ToolSearchDirectoryIntent,
+): Set<ToolDirectoryFamily> {
+  const toolText = `${tool.name} ${tool.description ?? ""}`.toLowerCase();
+  const families = new Set<ToolDirectoryFamily>();
+  if (TOOL_SEARCH_CONTROL_TOOL_NAMES.has(tool.name)) {
+    return families;
+  }
+  const hasMemoryToolSignal =
+    /\b(?:memory|memories|recall|remember|history|prior|knowledge|libravdb)\b/iu.test(toolText) ||
+    /(?:^|_)(?:memory|recall|remember|libravdb)(?:_|$)/iu.test(tool.name);
+  const hasWebToolSignal =
+    /\b(?:web|internet|online|browser|url|http|https|page|article|fetch|crawl|searxng|google|bing|brave|tavily|duckduckgo|serp)\b/iu.test(
+      toolText,
+    ) ||
+    /(?:^|_)(?:web|fetch|browser|searxng|google|bing|brave|tavily|duckduckgo|serp)(?:_|$)/iu.test(
+      tool.name,
+    );
+  const hasWebIntent =
+    intent.hasUrl ||
+    intent.hasCurrentFact ||
+    ["search", "lookup", "look", "find", "current", "today", "price", "latest", "news"].some(
+      (term) => intent.tokens.has(term),
+    );
+  if (hasWebToolSignal && hasWebIntent) {
+    families.add("web");
+  }
+  if (hasMemoryToolSignal && intent.hasMemoryRecall) {
+    families.add("memory");
+  }
+  return families;
 }
 
 function scoreDirectoryTool(
@@ -1175,10 +1245,67 @@ function scoreDirectoryTool(
   if (intent.hasSchedule && /cron|schedule|remind|heartbeat|automation/iu.test(toolText)) {
     score += 8;
   }
-  if (intent.hasCurrentFact && /search|web|fetch|weather|finance|price/iu.test(toolText)) {
+  if (
+    intent.hasCurrentFact &&
+    /searxng|web|internet|online|fetch|weather|finance|price|google|bing|brave|tavily|duckduckgo|serp/iu.test(
+      toolText,
+    )
+  ) {
+    score += 8;
+  }
+  if (
+    intent.hasMemoryRecall &&
+    /memory|memories|recall|remember|history|prior|knowledge|libravdb/iu.test(toolText)
+  ) {
     score += 8;
   }
   return score;
+}
+
+function expandDirectoryHydrationGroups(params: {
+  selectedNames: readonly string[];
+  tools: readonly Pick<AnyAgentTool, "name" | "description">[];
+  intent: ToolSearchDirectoryIntent;
+}): string[] {
+  const emitted = new Set<string>();
+  const expanded: string[] = [];
+  const toolsByName = new Map(params.tools.map((tool) => [tool.name, tool]));
+  const toolsByFamily = new Map<ToolDirectoryFamily, string[]>();
+  const selectedRank = new Map(params.selectedNames.map((name, index) => [name, index]));
+  for (const tool of params.tools) {
+    for (const family of classifyDirectoryToolFamilies(tool, params.intent)) {
+      const names = toolsByFamily.get(family) ?? [];
+      names.push(tool.name);
+      toolsByFamily.set(family, names);
+    }
+  }
+  for (const names of toolsByFamily.values()) {
+    names.sort(
+      (a, b) =>
+        (selectedRank.get(a) ?? Number.MAX_SAFE_INTEGER) -
+          (selectedRank.get(b) ?? Number.MAX_SAFE_INTEGER) || a.localeCompare(b),
+    );
+  }
+  for (const selectedName of params.selectedNames) {
+    if (!emitted.has(selectedName)) {
+      expanded.push(selectedName);
+      emitted.add(selectedName);
+    }
+    const selectedTool = toolsByName.get(selectedName);
+    if (!selectedTool) {
+      continue;
+    }
+    for (const family of classifyDirectoryToolFamilies(selectedTool, params.intent)) {
+      for (const groupedName of toolsByFamily.get(family) ?? []) {
+        if (emitted.has(groupedName)) {
+          continue;
+        }
+        expanded.push(groupedName);
+        emitted.add(groupedName);
+      }
+    }
+  }
+  return expanded;
 }
 
 export function estimateToolSchemaDirectoryToolNames(params: {
@@ -1205,7 +1332,14 @@ export function estimateToolSchemaDirectoryToolNames(params: {
     }))
     .filter((entry) => entry.score > 0)
     .toSorted((a, b) => b.score - a.score || a.name.localeCompare(b.name));
-  return uniqueStrings([...required, ...scored.map((entry) => entry.name)]).slice(0, maxTools);
+  const selected = uniqueStrings([...required, ...scored.map((entry) => entry.name)]);
+  return uniqueStrings(
+    expandDirectoryHydrationGroups({
+      selectedNames: selected,
+      tools: params.tools,
+      intent,
+    }),
+  ).slice(0, maxTools);
 }
 
 function describeEntry(entry: ToolSearchCatalogEntry) {
