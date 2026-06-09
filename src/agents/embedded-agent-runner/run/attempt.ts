@@ -216,6 +216,7 @@ import {
   createToolSearchCatalogRef,
   estimateToolSchemaDirectoryToolNames,
   projectToolSearchTargetTranscriptMessages,
+  resolveToolSearchCatalogTool,
   resolveToolSearchConfig,
   TOOL_CALL_RAW_TOOL_NAME,
   TOOL_DESCRIBE_RAW_TOOL_NAME,
@@ -2315,6 +2316,30 @@ export async function runEmbeddedAttempt(
           sessionManager,
           settingsManager,
           resourceLoader,
+          resolveMissingTool:
+            toolSearchControlsEnabledForRun &&
+            toolSearchConfig.mode === "directory" &&
+            toolSearch.catalogRegistered
+              ? ({ toolCall }) => {
+                  const tool = resolveToolSearchCatalogTool(
+                    {
+                      config: params.config,
+                      runtimeConfig: params.config,
+                      agentId: sessionAgentId,
+                      sessionKey: sandboxSessionKey,
+                      sessionId: params.sessionId,
+                      runId: params.runId,
+                      catalogRef: toolSearchCatalogRef,
+                      abortSignal: runAbortController.signal,
+                    },
+                    toolCall.name,
+                  );
+                  if (tool) {
+                    log.info(`tool-search: hydrated deferred directory tool ${toolCall.name}`);
+                  }
+                  return tool;
+                }
+              : undefined,
           withSessionWriteLock: (operation) =>
             sessionLockController.withSessionWriteLock(operation),
         },

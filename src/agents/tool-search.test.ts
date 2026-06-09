@@ -18,6 +18,7 @@ import {
   createToolSearchTools,
   estimateToolSchemaDirectoryToolNames,
   projectToolSearchTargetTranscriptMessages,
+  resolveToolSearchCatalogTool,
   TOOL_CALL_RAW_TOOL_NAME,
   TOOL_DESCRIBE_RAW_TOOL_NAME,
   TOOL_SEARCH_CODE_MODE_TOOL_NAME,
@@ -351,6 +352,32 @@ describe("Tool Search", () => {
       undefined,
       undefined,
     );
+  });
+
+  it("resolves exact deferred directory tools without fuzzy lookup", () => {
+    const describeTool = fakeTool(TOOL_DESCRIBE_RAW_TOOL_NAME, "describe");
+    const callTool = fakeTool(TOOL_CALL_RAW_TOOL_NAME, "call");
+    const target = pluginTool("fake_exact_hidden", "Hidden directory target");
+    const config = { tools: { toolSearch: { enabled: true, mode: "directory" } } } as never;
+
+    applyToolSchemaDirectoryCatalog({
+      tools: [describeTool, callTool, target],
+      config,
+      sessionId: "session-directory-resolve",
+    });
+
+    expect(
+      resolveToolSearchCatalogTool(
+        { sessionId: "session-directory-resolve", config },
+        "fake_exact_hidden",
+      ),
+    ).toBe(target);
+    expect(
+      resolveToolSearchCatalogTool(
+        { sessionId: "session-directory-resolve", config },
+        "fake_exact",
+      ),
+    ).toBeUndefined();
   });
 
   it("hydrates likely directory tool schemas while cataloging the rest", () => {

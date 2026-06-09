@@ -929,6 +929,22 @@ export function buildToolSchemaDirectoryPrompt(
   return formatToolSearchCatalogDirectory(runtime.all(options));
 }
 
+/** Resolve an exact hidden catalog tool name/id without exposing fuzzy search. */
+export function resolveToolSearchCatalogTool(
+  ctx: ToolSearchToolContext,
+  id: string,
+  options?: CatalogVisibilityOptions,
+): AnyAgentTool | undefined {
+  try {
+    return findEntry(resolveCatalog(ctx), id, options).tool as AnyAgentTool;
+  } catch (error) {
+    if (error instanceof ToolInputError) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 /** Move client-provided tools into an existing Tool Search catalog. */
 export function addClientToolsToToolSearchCatalog(params: {
   tools: ToolDefinition[];
